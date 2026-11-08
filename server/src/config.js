@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 // Process configuration comes only from the host's environment / secret store.
 // No provider keys live here: those are entered by the admin and stored encrypted in the DB.
 function required(name) {
@@ -20,10 +21,13 @@ export const config = {
     ? { rejectUnauthorized: process.env.DATABASE_SSL_INSECURE !== 'true', ...(process.env.DATABASE_SSL_CA ? { ca: process.env.DATABASE_SSL_CA.replace(/\\n/g, '\n') } : {}) }
     : undefined,
   // 32-byte key, base64. Used to encrypt provider secrets and phone numbers at rest.
+  // Either 32 random bytes in base64 (44 chars ending in '='), or any random password of 40+ characters
+  // (e.g. from a password manager), which is turned into a 32-byte key with SHA-256.
   get encryptionKey() {
-    const key = Buffer.from(required('SETTINGS_ENCRYPTION_KEY'), 'base64');
-    if (key.length !== 32) throw new Error('SETTINGS_ENCRYPTION_KEY must be 32 bytes, base64-encoded');
-    return key;
+    const raw = required('SETTINGS_ENCRYPTION_KEY').trim();
+    if (/^[A-Za-z0-9+/]{43}=$/.test(raw)) return Buffer.from(raw, 'base64');
+    if (raw.length >= 40) return crypto.createHash('sha256').update(raw, 'utf8').digest();
+    throw new Error('SETTINGS_ENCRYPTION_KEY must be a random password of at least 40 characters (or 32 bytes base64)');
   },
   // Public HTTPS origin, e.g. https://play.example.com — used for CSRF Origin checks and redirect URLs.
   publicOrigin: process.env.PUBLIC_ORIGIN || (isProd ? required('PUBLIC_ORIGIN') : 'http://localhost:5173'),

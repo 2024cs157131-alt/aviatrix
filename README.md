@@ -4,7 +4,7 @@ There is one crash table with two independent bets per round, a provably fair cr
 
 > **Licensing.** This is real-money gambling software. Production payments stay switched off until an admin sets the operator-licence flag, giving the jurisdiction and licence number. That flag is a software gate only. It does not replace the licence itself (in Kenya, from the BCLB).
 
-> **Hosting it now?** Follow [Your setup: Vercel + Railway + Neon](#your-setup-vercel-site--railway-backend--neon-database). Other options are further down.
+> **Hosting it now?** Follow [Setup without running any commands](#setup-without-running-any-commands).
 
 ## Architecture
 
@@ -106,6 +106,84 @@ Then open `/admin` (password + authenticator code), add sandbox credentials, ena
 
 **Tests** (they need a throwaway DB whose name contains `test`). There are 12 integration tests, including paybill C2B, unassigned-payment assignment, balance-cache integrity and TOTP:
 `DATABASE_URL=postgres://…/crash_test npm test`. They cover provably-fair distribution, verified-callback-only crediting, forged and replayed callbacks, STK-query mismatch, bet/cancel/cashout/auto-cashout, late cashout rejection, the withdrawal reserve/release/finalise path, append-only enforcement and the provider kill-switch. `server/test/e2e.sh` runs the same flows over HTTP against a running stack, with `server/test/mock-fetch.js` preloaded so Safaricom can be faked locally. That file refuses to load in production.
+
+## Setup without running any commands
+
+**Neon**
+1. neon.com → New project → Europe region.
+2. Connect → copy the **pooled** string (contains `-pooler`).
+3. Turn connection pooling off → copy the **direct** string.
+
+**Two secrets (from a password manager's generator, e.g. Bitwarden / Google Password Manager)**
+4. Generate a random password of **48 characters**. This is the **encryption key**. Save it and never change it.
+5. Generate another random password of **32 characters**. This is the **setup code**.
+
+**Railway: web**
+6. railway.com → upgrade to Hobby.
+7. New Project → Deploy from GitHub repo → `aviatrix`.
+8. Rename the service `web`.
+9. Settings → Region → EU West.
+10. Settings → Networking → Generate Domain → copy it (the **backend domain**).
+11. Settings → Deploy → Pre-deploy command → `npm run migrate`
+12. Settings → Deploy → Healthcheck path → `/healthz`
+13. Variables:
+    * `DATABASE_URL` = Neon pooled string
+    * `DATABASE_DIRECT_URL` = Neon direct string
+    * `DATABASE_SSL` = `true`
+    * `SETTINGS_ENCRYPTION_KEY` = encryption key (step 4)
+    * `ADMIN_SETUP_TOKEN` = setup code (step 5)
+    * `NODE_ENV` = `production`
+    * `TRUST_PROXY` = `2`
+    * `PUBLIC_WS_URL` = `wss://<backend domain>/ws`
+    * `PUBLIC_ORIGIN` = `https://<backend domain>`
+14. Deploy → logs show `web listening`.
+
+**Railway: worker**
+15. + New → GitHub Repo → `aviatrix`.
+16. Rename it `worker`.
+17. Settings → Region → EU West.
+18. Variables → the same as `web` (without `ADMIN_SETUP_TOKEN`).
+19. Settings → Deploy → Custom start command → `node server/src/worker.js`
+20. Deploy → logs show `engine leader acquired`.
+
+**Vercel**
+21. GitHub → `vercel.json` → ✏️ Edit → replace `REPLACE-WITH-YOUR-BACKEND-DOMAIN` (2 places) with the backend domain, without `https://` → Commit. (Or send the domain to Claude to do it.)
+22. Vercel → Settings → Framework Preset → Other, overrides off.
+23. Wait for the redeploy → copy the Vercel domain (the **site domain**).
+
+**Railway: switch to the site domain**
+24. `web` and `worker` → `PUBLIC_ORIGIN` = `https://<site domain>`
+25. Redeploy both.
+
+**Admin account (in the browser)**
+26. Install an authenticator app on your phone (Google Authenticator / Microsoft Authenticator).
+27. Open `https://<site domain>/admin`.
+28. Enter the setup code, a username, and a password (14+ characters) → Continue.
+29. Tap **Open in authenticator app** (or type the shown key into the app).
+30. Enter the 6-digit code → Create admin.
+31. Railway → `web` → Variables → delete `ADMIN_SETUP_TOKEN` → redeploy.
+32. Sign in at `/admin` with username, password and code.
+
+**M-Pesa sandbox**
+33. Credentials → M-Pesa · sandbox → fill in every field.
+34. Callback base URL → `https://<backend domain>`
+35. Certificate → paste the full text of the sandbox `.cer` file → Save.
+36. Limits → set → Save.
+37. Providers → M-Pesa On (sandbox).
+38. Register sandbox URLs.
+
+**Test**
+39. Open `https://<site domain>` → register a player.
+40. Cashier → Deposit → logs on `web` show `deposit confirmed`.
+41. Bet → cash out → withdraw.
+
+**Go live**
+42. Neon → upgrade to a paid plan.
+43. Safaricom Go Live. Ask them to enable B2C and C2B validation on your paybill.
+44. Admin → Providers → Operator licence → enter the licence.
+45. Credentials → M-Pesa · production → keys + production certificate.
+46. Providers → M-Pesa → production.
+47. Register production URLs.
 
 ## Your setup: Vercel (site) + Railway (backend) + Neon (database)
 

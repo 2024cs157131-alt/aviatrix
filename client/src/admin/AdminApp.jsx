@@ -10,7 +10,7 @@ export default function AdminApp() {
   const load = useCallback(() => A('/session').then(r => setAdmin(r.admin)).catch(() => setAdmin(null)), []);
   useEffect(() => { load(); }, [load]);
   if (admin === undefined) return <div className="app narrow"><p>Loading…</p></div>;
-  if (!admin) return <Login onDone={load} />;
+  if (!admin) return <LoginOrSetup onDone={load} />;
   return (
     <div className="app admin">
       <header className="top">
@@ -34,6 +34,62 @@ function useMsg() {
   const wrap = fn => async (...a) => { setM(null); try { await fn(...a); setM({ ok: true, t: 'Saved.' }); } catch (e) { setM({ ok: false, t: e.message }); } };
   const el = m && <p className={m.ok ? 'win' : 'error'}>{m.t}</p>;
   return [wrap, el];
+}
+
+function LoginOrSetup({ onDone }) {
+  const [needed, setNeeded] = useState(null);
+  useEffect(() => { A('/setup').then(r => setNeeded(r.needed)).catch(() => setNeeded(false)); }, []);
+  if (needed === null) return <div className="app narrow"><p>Loading…</p></div>;
+  return needed ? <Setup onDone={() => setNeeded(false)} /> : <Login onDone={onDone} />;
+}
+
+// First-admin setup: only shown while no admin exists and the server has ADMIN_SETUP_TOKEN set.
+function Setup({ onDone }) {
+  const [f, setF] = useState({ token: '', username: '', password: '', confirm: '' });
+  const [secret, setSecret] = useState(null);
+  const [code, setCode] = useState('');
+  const [err, setErr] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const set = k => e => setF({ ...f, [k]: e.target.value });
+  const body = () => ({ token: f.token.trim(), username: f.username.trim(), password: f.password });
+  async function start(e) {
+    e.preventDefault(); setErr(null);
+    if (f.password !== f.confirm) return setErr('Passwords do not match.');
+    setBusy(true);
+    try { setSecret((await A('/setup', { method: 'POST', body: body() })).secret); } catch (x) { setErr(x.message); } finally { setBusy(false); }
+  }
+  async function finish(e) {
+    e.preventDefault(); setErr(null); setBusy(true);
+    try { await A('/setup', { method: 'POST', body: { ...body(), secret, code } }); onDone(); } catch (x) { setErr(x.message); setCode(''); } finally { setBusy(false); }
+  }
+  const uri = secret && `otpauth://totp/Crash%20Admin:${encodeURIComponent(f.username.trim())}?secret=${secret}&issuer=Crash%20Admin&digits=6&period=30`;
+  return (
+    <div className="gate">
+      {!secret ? (
+        <form className="card form" onSubmit={start}>
+          <h2>Create the admin account</h2>
+          <p className="small muted">One-time setup. Use the ADMIN_SETUP_TOKEN value you set on Railway.</p>
+          <label>Setup code<input value={f.token} onChange={set('token')} autoComplete="off" /></label>
+          <label>Admin username<input value={f.username} onChange={set('username')} autoComplete="username" /></label>
+          <label>Password (14+ characters)<input type="password" value={f.password} onChange={set('password')} autoComplete="new-password" /></label>
+          <label>Confirm password<input type="password" value={f.confirm} onChange={set('confirm')} autoComplete="new-password" /></label>
+          {err && <p className="error">{err}</p>}
+          <button className="btn primary wide" disabled={busy}>Continue</button>
+        </form>
+      ) : (
+        <form className="card form" onSubmit={finish}>
+          <h2>Set up your authenticator</h2>
+          <p className="small">On this phone: <a className="btn" href={uri}>Open in authenticator app</a></p>
+          <p className="small">Or in the app choose <b>Enter a setup key</b> (time-based) and type:</p>
+          <p className="center"><code style={{ fontSize: 17, letterSpacing: 2 }}>{secret.match(/.{1,4}/g).join(' ')}</code></p>
+          <label>6-digit code from the app<input inputMode="numeric" autoComplete="one-time-code" maxLength={6} value={code} onChange={e => setCode(e.target.value.replace(/\D/g, ''))} /></label>
+          {err && <p className="error">{err}</p>}
+          <button className="btn primary wide" disabled={busy || code.length !== 6}>Create admin</button>
+          <p className="small muted">Keep the setup key somewhere safe. It is shown only now.</p>
+        </form>
+      )}
+    </div>
+  );
 }
 
 function Login({ onDone }) {

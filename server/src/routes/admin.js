@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { q, tx } from '../db.js';
 import { createSession, destroySession, requireAdmin, verifyPassword } from '../auth.js';
-import { decrypt, verifyTotp } from '../crypto.js';
+import { decrypt, verifyTotp, encrypt, newTotpSecret, hashPassword, safeEqual } from '../crypto.js';
 import { limit } from '../ratelimit.js';
 import { getSetting, setSetting, saveCredentials, credentialSummary, PROVIDER_FIELDS, loadCredentials, missingFields } from '../settings.js';
 import { balanceOf, reservedOf, post, lockUser, LedgerError } from '../ledger.js';
@@ -9,6 +9,46 @@ import { reconcilePayment, resolveWithdrawal, processEvent, publicPayment, regis
 import { CASHIA_PAYOUTS_SUPPORTED } from '../providers/cashia.js';
 
 const r = Router();
+
+// ---- First-admin setup in the browser (no terminal needed).
+// Works only while NO admin exists AND the host has ADMIN_SETUP_TOKEN set. Remove the variable afterwards.
+const noAdmins = async c => (await c.query(`SELECT count(*)::int n FROM users WHERE role='admin'`)).rows[0].n === 0;
+const setupToken = () => (process.env.ADMIN_SETUP_TOKEN || '').trim();
+
+r.get('/setup', async (req, res) => {
+  res.json({ needed: (await noAdmins({ query: q })) && setupToken().length >= 20 });
+});
+
+r.post('/setup', limit('admin-setup', 10, 3600, req => req.ip), async (req, res) => {
+  const { token, username, password, secret, code } = req.body || {};
+  const fail = (s, error, message) => res.status(s).json({ error, message });
+  if (setupToken().length < 20) return fail(410, 'setup_disabled', 'Setup is disabled. Set ADMIN_SETUP_TOKEN (20+ characters) on the server.');
+  if (!safeEqual(String(token || ''), setupToken())) return fail(403, 'bad_token', 'Wrong setup code.');
+  if (!(await noAdmins({ query: q }))) return fail(410, 'setup_done', 'An admin already exists. Sign in instead.');
+  if (!/^[A-Za-z0-9_]{3,20}$/.test(username || '')) return fail(400, 'bad_username', 'Username: 3–20 letters, numbers or _.');
+  if (typeof password !== 'string' || password.length < 14) return fail(400, 'weak_password', 'Password must be at least 14 characters.');
+  // Step 1: no secret yet -> issue one for the authenticator app.
+  if (!secret) return res.json({ step: 'totp', secret: newTotpSecret() });
+  // Step 2: the code proves the authenticator app is set up correctly; then create the admin.
+  const step = verifyTotp(String(secret), code);
+  if (step == null) return fail(400, 'bad_code', 'That code does not match. Check the app and try the next code.');
+  try {
+    await tx(async c => {
+      await c.query('SELECT pg_advisory_xact_lock(727003)');
+      if (!(await noAdmins(c))) throw Object.assign(new Error('An admin already exists.'), { code: 'setup_done' });
+      const u = (await c.query(
+        `INSERT INTO users(username, password_hash, role, totp_secret_enc, totp_last_step) VALUES ($1,$2,'admin',$3,$4) RETURNING id`,
+        [username, hashPassword(password), encrypt(String(secret)), step])).rows[0];
+      await c.query(`INSERT INTO admin_audit(actor_id, action, detail) VALUES ($1,'admin.setup','{}')`, [u.id]);
+    });
+  } catch (e) {
+    if (e.code === '23505') return fail(409, 'taken', 'That username is taken by a player account.');
+    if (e.code === 'setup_done') return fail(410, 'setup_done', e.message);
+    throw e;
+  }
+  res.json({ ok: true });
+});
+
 
 r.post('/login', limit('admin-login-ip', 10, 900, req => req.ip), limit('admin-login-user', 5, 900, req => String(req.body?.username || '').toLowerCase()),
   async (req, res) => {
