@@ -162,15 +162,13 @@ Deploy. The logs should show `applied 001_init.sql`, `applied 002_paybill_scale.
 3. **Settings → Deploy → Custom start command:** `node server/src/worker.js`. No domain, and no pre-deploy command.
 4. The logs show `engine leader acquired`. Rounds are now running. Keep exactly one worker.
 
-### Step 5: Vercel (site)
-1. On your computer, in the repo:
-```bash
-npm ci
-npm run set-backend -- https://<backend domain>
-git commit -am "Point Vercel at Railway backend" && git push
-```
-   (Or edit `vercel.json` on GitHub and replace both `REPLACE-WITH-YOUR-BACKEND-DOMAIN` with your backend domain, without `https://` in the CSP line.)
-2. vercel.com → your `aviatrix` project, or **Add New → Project → import `aviatrix`**. Framework preset **Other**. Leave the build settings alone, because `vercel.json` sets them. Deploy.
+### Step 5: Vercel (site): already imported, just point it at Railway
+The repo is already connected to Vercel, and every push to `main` redeploys it automatically. Until this step, the site loads but `/api` points at a placeholder, so sign-in and the game don't work yet.
+1. Point `vercel.json` at your backend domain, in any one of these ways:
+   * **Computer:** `npm ci && npm run set-backend -- https://<backend domain>`, then `git commit -am "Point Vercel at Railway backend" && git push`
+   * **GitHub website:** open `vercel.json` → ✏️ Edit. Replace `REPLACE-WITH-YOUR-BACKEND-DOMAIN` in **both** places with your backend domain *without* `https://` (e.g. `aviatrix-web.up.railway.app`). Commit to `main`.
+   * **Ask Claude:** send the backend domain and it will make and push the change.
+2. Vercel redeploys on its own within a minute or two. In the project settings, check that **Framework Preset = Other** and that the build/output overrides are **off**, so `vercel.json` is what's used.
 3. Copy the Vercel domain, e.g. `https://aviatrix.vercel.app`. This is your **site domain**.
 
 ### Step 6: Connect Railway to the site domain
