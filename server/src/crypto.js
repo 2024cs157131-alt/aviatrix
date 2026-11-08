@@ -77,3 +77,16 @@ export function verifyTotp(secret, code, lastStep = null) {
   }
   return null;
 }
+
+// ---- WebSocket tickets: lets a browser on the site domain open an authenticated socket to the API domain
+// (cookies don't travel cross-site). Stateless HMAC, valid 60 s: `${userId}.${expiry}.${mac}`.
+const wsKey = () => crypto.createHmac('sha256', config.encryptionKey).update('ws-ticket-v1').digest();
+export function issueWsTicket(userId) {
+  const exp = Math.floor(Date.now() / 1000) + 60;
+  return `${userId}.${exp}.${hmacHex(wsKey(), `${userId}.${exp}`)}`;
+}
+export function readWsTicket(t) {
+  const [uid, exp, mac] = String(t || '').split('.');
+  if (!uid || !exp || !mac || Number(exp) < Date.now() / 1000) return null;
+  return safeEqual(mac, hmacHex(wsKey(), `${uid}.${exp}`)) ? Number(uid) : null;
+}

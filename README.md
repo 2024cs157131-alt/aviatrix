@@ -105,7 +105,20 @@ Then open `/admin` (password + authenticator code), add sandbox credentials, ena
 **Tests** (they need a throwaway DB whose name contains `test`). There are 12 integration tests, including paybill C2B, unassigned-payment assignment, balance-cache integrity and TOTP:
 `DATABASE_URL=postgres://…/crash_test npm test`. They cover provably-fair distribution, verified-callback-only crediting, forged and replayed callbacks, STK-query mismatch, bet/cancel/cashout/auto-cashout, late cashout rejection, the withdrawal reserve/release/finalise path, append-only enforcement and the provider kill-switch. `server/test/e2e.sh` runs the same flows over HTTP against a running stack, with `server/test/mock-fetch.js` preloaded so Safaricom can be faked locally. That file refuses to load in production.
 
-## Deploy (zero-downtime)
+## Deploy option A: frontend on Vercel, backend on an always-on host
+
+Vercel only serves static files and short-lived functions. It **cannot** run the round worker, hold WebSockets, or reliably receive M-Pesa callbacks. So the site goes on Vercel, and the API and worker run on any host that keeps a Node process running (a Docker host or VM using the `Dockerfile`).
+
+1. **Backend** (e.g. `https://api.yourdomain.co.ke`): deploy the Docker image twice, once as web and once as worker (`node server/src/worker.js`). Set these in its secret store:
+   * `DATABASE_URL`, `DATABASE_DIRECT_URL`, `SETTINGS_ENCRYPTION_KEY`, `NODE_ENV=production`
+   * `PUBLIC_ORIGIN=https://<your-vercel-domain>`: the site players open. Used for CSRF and Origin checks.
+   * `PUBLIC_WS_URL=wss://api.yourdomain.co.ke/ws`: the browser connects its live feed straight to the backend.
+   * `TRUST_PROXY=2` (Vercel plus your host's load balancer), so rate limits see the player's real IP.
+2. **Vercel:** `vercel.json` already sets the build (`npm run build` → `client/dist`). Replace both `REPLACE-WITH-YOUR-BACKEND-DOMAIN` placeholders with your backend domain: one in the `/api` rewrite, one in the CSP `connect-src`. Vercel then proxies `/api/*` on the same domain, so session cookies, CSRF and admin all work unchanged.
+3. **Live feed sign-in:** Vercel can't proxy WebSockets, so the socket goes directly to the backend. A signed-in player's socket is authenticated with a 60-second HMAC ticket from `POST /api/ws-ticket`, because cookies don't cross domains.
+4. **M-Pesa / Cashia callback base URL** (admin → Credentials): use the **backend** domain directly, not Vercel. That's one fewer hop, and no proxy timeouts on Safaricom's callbacks.
+
+## Deploy option B: single host (zero-downtime)
 1. Build the image (`Dockerfile`). It excludes tests and contains no secrets.
 2. Set `DATABASE_URL`, `SETTINGS_ENCRYPTION_KEY`, `PUBLIC_ORIGIN` (https) and `NODE_ENV=production` in the host's secret store.
 3. Release step: `node server/scripts/migrate.js`. Migrations are forward-only and run under an advisory lock.

@@ -8,6 +8,8 @@ import { startDeposit, startWithdrawal, myPayments, getPayment } from '../paymen
 import { activeProviders, getSetting } from '../settings.js';
 import { CASHIA_PAYOUTS_SUPPORTED } from '../providers/cashia.js';
 import { HOUSE_EDGE_BP, GROWTH_PER_MS } from '../fair.js';
+import { issueWsTicket } from '../crypto.js';
+import { config as appConfig } from '../config.js';
 
 const r = Router();
 const ip = req => req.ip;
@@ -30,7 +32,7 @@ r.get('/config', async (req, res) => {
       name, environment: v.environment, deposits: true, withdrawals: name === 'mpesa' || CASHIA_PAYOUTS_SUPPORTED,
       ...(name === 'mpesa' ? { paybill: v.creds.shortcode } : {}),   // public business number, not a secret
     })),
-    limits, tableOpen: await tableOpen(),
+    limits, tableOpen: await tableOpen(), wsUrl: appConfig.publicWsUrl,
     fair: { houseEdgeBp: HOUSE_EDGE_BP, growthPerMs: GROWTH_PER_MS, clientSeed: (await getSetting('fair'))?.clientSeed ?? null },
   });
 });
@@ -106,6 +108,7 @@ const send = fn => async (req, res) => {
   }
 };
 
+r.post('/ws-ticket', P, memLimit(30, 60, req => req.user.id), (req, res) => res.json({ ticket: issueWsTicket(req.user.id) }));
 r.get('/bets/mine', P, send(req => myBets(req.user.id)));
 r.post('/bets', P, memLimit(20, 10, req => req.user.id), send(req => placeBet(req.user, req.body || {})));
 r.post('/bets/:id/cancel', P, memLimit(20, 10, req => req.user.id), send(req => cancelBet(req.user, Number(req.params.id))));

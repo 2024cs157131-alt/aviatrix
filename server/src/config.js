@@ -24,4 +24,7 @@ export const config = {
   // Public HTTPS origin, e.g. https://play.example.com — used for CSRF Origin checks and redirect URLs.
   publicOrigin: process.env.PUBLIC_ORIGIN || (isProd ? required('PUBLIC_ORIGIN') : 'http://localhost:5173'),
   trustProxy: process.env.TRUST_PROXY ?? '1',
+  // Split deploy (static site on Vercel/CDN, API elsewhere): the browser connects its WebSocket straight to
+  // the backend, e.g. wss://api.example.co.ke/ws. Leave empty when site and API share one domain.
+  publicWsUrl: process.env.PUBLIC_WS_URL || null,
 };

@@ -5,6 +5,7 @@ import pg from 'pg';
 import { config } from './config.js';
 import { q } from './db.js';
 import { sessionUser } from './auth.js';
+import { readWsTicket } from './crypto.js';
 import { publicRoundEvent } from './engine.js';
 import { log } from './log.js';
 
@@ -18,8 +19,16 @@ export function attachRealtime(server) {
     if (!req.url.startsWith('/ws')) return socket.destroy();
     const origin = req.headers.origin;
     if (config.isProd && origin !== config.publicOrigin) return socket.destroy();
-    const user = await sessionUser(req, 'player').catch(() => null);
-    wss.handleUpgrade(req, socket, head, ws => { ws.userId = user?.id ?? null; wss.emit('connection', ws); });
+    // Same-domain deploys authenticate with the session cookie; split deploys pass a short-lived ticket.
+    const ticket = new URL(req.url, 'http://x').searchParams.get('ticket');
+    let userId = ticket ? readWsTicket(ticket) : null;
+    if (userId) {
+      const ok = (await q('SELECT 1 FROM users WHERE id=$1 AND NOT disabled', [userId])).rowCount;
+      if (!ok) userId = null;
+    } else {
+      userId = (await sessionUser(req, 'player').catch(() => null))?.id ?? null;
+    }
+    wss.handleUpgrade(req, socket, head, ws => { ws.userId = userId; wss.emit('connection', ws); });
   });
 
   wss.on('connection', async ws => {

@@ -51,8 +51,7 @@ export default function App() {
   }, [loadMe]);
 
   useEffect(() => {
-    api('/config').then(setConfig).catch(() => {});
-    loadMe().finally(() => setReady(true));
+    Promise.all([api('/config').then(setConfig).catch(() => {}), loadMe()]).finally(() => setReady(true));
     const id = setInterval(() => api('/config').then(setConfig).catch(() => {}), 30000);
     return () => clearInterval(id);
   }, [loadMe]);
@@ -80,18 +79,10 @@ export default function App() {
         case 'me': refreshSoon(); break;
       }
     };
-    wsRef.current = connect(onMsg, setLive);
+    wsRef.current = connect({ wsUrl: config?.wsUrl || null, signedIn: !!me.user }, onMsg, setLive);
     return () => wsRef.current?.close();
-  }, [refreshSoon, ready]);
+  }, [refreshSoon, ready, config?.wsUrl, !!me.user]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Reconnect the socket after login/logout so the server knows who to send balance events to.
-  const userId = me.user?.id;
-  const seenUser = useRef(undefined);
-  useEffect(() => {
-    if (!ready) return;
-    if (seenUser.current !== undefined && seenUser.current !== (userId ?? null)) wsRef.current?.reconnect();
-    seenUser.current = userId ?? null;
-  }, [userId, ready]);
 
   // Cashia redirect back: show the cashier so the player can watch the pending payment.
   useEffect(() => {
