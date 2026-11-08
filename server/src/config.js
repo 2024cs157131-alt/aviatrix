@@ -14,7 +14,11 @@ export const config = {
   databaseUrl: required('DATABASE_URL'),
   databaseDirectUrl: process.env.DATABASE_DIRECT_URL || process.env.DATABASE_URL,
   poolMax: Number(process.env.PG_POOL_MAX || 20),
-  databaseSsl: process.env.DATABASE_SSL === 'true' ? { rejectUnauthorized: process.env.DATABASE_SSL_INSECURE !== 'true' } : undefined,
+  // TLS to the database. DATABASE_SSL_CA = the provider's CA certificate (PEM) for providers that sign with
+  // their own CA (Supabase, Aiven), so the connection is verified instead of trusting any certificate.
+  databaseSsl: process.env.DATABASE_SSL === 'true' || process.env.DATABASE_SSL_CA
+    ? { rejectUnauthorized: process.env.DATABASE_SSL_INSECURE !== 'true', ...(process.env.DATABASE_SSL_CA ? { ca: process.env.DATABASE_SSL_CA.replace(/\\n/g, '\n') } : {}) }
+    : undefined,
   // 32-byte key, base64. Used to encrypt provider secrets and phone numbers at rest.
   get encryptionKey() {
     const key = Buffer.from(required('SETTINGS_ENCRYPTION_KEY'), 'base64');

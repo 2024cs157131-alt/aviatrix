@@ -4,6 +4,8 @@ There is one crash table with two independent bets per round, a provably fair cr
 
 > **Licensing.** This is real-money gambling software. Production payments stay switched off until an admin sets the operator-licence flag, giving the jurisdiction and licence number. That flag is a software gate only. It does not replace the licence itself (in Kenya, from the BCLB).
 
+> **Hosting it now?** Jump to [Host the backend now: step by step (Railway)](#host-the-backend-now-step-by-step-railway).
+
 ## Architecture
 
 ```
@@ -105,7 +107,102 @@ Then open `/admin` (password + authenticator code), add sandbox credentials, ena
 **Tests** (they need a throwaway DB whose name contains `test`). There are 12 integration tests, including paybill C2B, unassigned-payment assignment, balance-cache integrity and TOTP:
 `DATABASE_URL=postgres://…/crash_test npm test`. They cover provably-fair distribution, verified-callback-only crediting, forged and replayed callbacks, STK-query mismatch, bet/cancel/cashout/auto-cashout, late cashout rejection, the withdrawal reserve/release/finalise path, append-only enforcement and the provider kill-switch. `server/test/e2e.sh` runs the same flows over HTTP against a running stack, with `server/test/mock-fetch.js` preloaded so Safaricom can be faked locally. That file refuses to load in production.
 
+## Host the backend now: step by step (Railway)
+
+This puts the **whole app** (API, worker, database, and the game site itself) on Railway. It runs on one HTTPS domain, so you can play and test straight away. Vercel is optional; see the next section.
+
+**Why Railway:** it deploys this repo's `Dockerfile` straight from GitHub, keeps processes running 24/7, supports WebSockets, and gives you HTTPS. It needs the **Hobby plan ($5/month, which includes $5 of usage)**. Web + worker + Postgres for a small launch should cost roughly $5–10/month. Check the usage page after the first week.
+**Why not Render's free tier:** free web services sleep after 15 minutes idle, so you'd miss M-Pesa callbacks, and background workers have no free tier.
+
+### 0. Before you start
+* This repo on GitHub, and a Railway account (sign in with GitHub). Upgrade to Hobby.
+* Node.js 20+ on your computer. You need it once, to create the admin account.
+* Your Daraja sandbox app from developer.safaricom.co.ke: consumer key/secret, test paybill shortcode + passkey, initiator name + password, and the **sandbox certificate** (`.cer`, from the Daraja docs).
+* An authenticator app on your phone (Google Authenticator, Authy, Microsoft Authenticator).
+
+### 1. Make the encryption key, and keep it safe
+On your computer:
+```bash
+node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"
+```
+Save the output in a password manager. **If you lose it, every saved provider key becomes unreadable.** If it leaks, someone with database access can read them. Never commit it.
+
+### 2. Create the project and database
+1. Railway → **New Project → Deploy from GitHub repo** → pick `aviatrix`. Railway finds the `Dockerfile` and starts building. Rename this service **`web`**.
+2. In the same project: **+ New → Database → PostgreSQL**.
+
+### 3. Configure the `web` service
+Open **web → Variables** and add:
+
+| Variable | Value |
+|---|---|
+| `DATABASE_URL` | `${{Postgres.DATABASE_URL}}` (a Railway reference: private network, no password copying) |
+| `SETTINGS_ENCRYPTION_KEY` | the key from step 1 |
+| `NODE_ENV` | `production` |
+| `TRUST_PROXY` | `1` |
+| `PUBLIC_ORIGIN` | `https://<your web domain>` (fill in after step 4) |
+
+Then **web → Settings**:
+* **Networking → Generate Domain.** You get `https://<something>.up.railway.app`. Put that exact URL into `PUBLIC_ORIGIN`, with no trailing slash.
+* **Deploy → Pre-deploy command:** `npm run migrate` (creates and updates tables before each release).
+* **Deploy → Healthcheck path:** `/healthz`
+* Leave the start command empty. The Dockerfile already runs the web server.
+
+Redeploy. Open the domain: you should see the 18+ gate and the table in read-only mode.
+
+### 4. Add the `worker` service (round engine)
+1. **+ New → GitHub Repo → `aviatrix`** again, and name it **`worker`**.
+2. **Variables:** the same `DATABASE_URL`, `SETTINGS_ENCRYPTION_KEY`, `NODE_ENV`, `PUBLIC_ORIGIN` as `web`. Railway's *Shared Variables* save retyping.
+3. **Settings → Deploy → Custom start command:** `node server/src/worker.js`. Don't generate a domain and don't add a pre-deploy command.
+
+The worker logs `engine leader acquired`, and rounds start. Run exactly one worker. A second would only wait as a standby.
+
+### 5. Create your admin account (from your computer, once)
+1. Railway → **Postgres → Variables**: copy **`DATABASE_PUBLIC_URL`**. This is reachable from outside Railway; the private URL isn't.
+2. On your computer:
+```bash
+git clone https://github.com/2024cs157131-alt/aviatrix && cd aviatrix && npm ci
+DATABASE_URL='<DATABASE_PUBLIC_URL>' SETTINGS_ENCRYPTION_KEY='<key from step 1>' npm run create-admin -- yourname
+```
+(On Windows PowerShell, set the two variables with `$env:DATABASE_URL='...'` and `$env:SETTINGS_ENCRYPTION_KEY='...'` first, then run `npm run create-admin -- yourname`.)
+
+3. Type a password of 14+ characters. The command prints a **2FA secret**: add it to your authenticator app (*Enter a setup key*, time-based), then clear the terminal. The **same encryption key** must be used here as on Railway, or 2FA won't verify.
+
+### 6. Connect M-Pesa (sandbox first)
+Go to `https://<your domain>/admin` and sign in with username, password and authenticator code.
+1. **Credentials → M-Pesa · sandbox:** fill in every field. **Callback base URL** = `https://<your domain>`. For the **certificate**, open the sandbox `.cer` in a text editor and paste it (`-----BEGIN CERTIFICATE-----…`). Save. Afterwards you'll only ever see `••••` + last four characters.
+2. **Limits:** set deposit, withdrawal and bet min/max.
+3. **Providers:** tick **M-Pesa → On** (environment: sandbox), then click **Register sandbox URLs** under *Paybill (C2B) URLs*.
+4. Open the site, register a player, and in **Cashier** try an STK deposit (follow the Daraja sandbox test instructions). The balance changes only when Safaricom's callback arrives. Watch **web → Logs** for `stk sent` → `deposit confirmed`. Problems show in **Admin → Payments → Details → Callbacks**.
+
+### 7. Going live (production)
+1. Get your production Daraja app approved by Safaricom ("Go Live"). Ask them to enable **B2C on your paybill** and, if you want unknown account numbers rejected up front, **C2B external validation**.
+2. **Admin → Providers → Operator licence:** enter your BCLB licence number and jurisdiction. Production stays locked until this is set.
+3. **Credentials → M-Pesa · production:** production keys plus the **production** certificate (it's different from the sandbox one).
+4. Switch M-Pesa's environment to **production**, then click **Register production URLs**. Safaricom allows this once per paybill, so do it only after your final domain is set.
+5. Optional but recommended: add Safaricom's published callback IPs under *Callback source IP allowlist*. Set `TRUST_PROXY` correctly first (Railway: `1`; behind Vercel: `2`), or the allowlist will see the wrong IPs.
+6. Move the database to a paid plan with backups (Railway Postgres backups or a managed provider) before taking real money. Test a restore once.
+
+### 8. Custom domain (optional)
+**web → Settings → Networking → Custom Domain** (e.g. `play.yourdomain.co.ke`). Add the CNAME Railway shows at your DNS provider. Then update `PUBLIC_ORIGIN` on both services and the M-Pesa **Callback base URL** in admin, *before* registering production C2B URLs.
+
+### Troubleshooting
+| Symptom | Fix |
+|---|---|
+| `Missing required environment variable …` in logs | Add it on **both** web and worker. |
+| `SETTINGS_ENCRYPTION_KEY must be 32 bytes` | Regenerate with the command in step 1. Paste it without quotes or spaces. |
+| Every POST returns `bad_origin` / `csrf` | `PUBLIC_ORIGIN` must exactly equal the address in the browser bar (https, no trailing slash). |
+| Table stays read-only | Admin → Providers: M-Pesa must be **On** with complete credentials for the selected environment. |
+| Multiplier never moves | The worker isn't running or can't reach the DB. Check **worker → Logs** for `engine leader acquired`. |
+| Admin: "Invalid or reused authenticator code" | The phone clock must be automatic. Each code works once, so wait for the next one. Re-running create-admin rotates the secret. |
+| Deposits stay *pending* | Callback base URL is wrong or not https. Look in Admin → Payments → Details → Callbacks for received or rejected events. The worker re-checks pending STK deposits every minute. |
+| Database on Supabase/Aiven | Set `DATABASE_SSL_CA` to their CA certificate (PEM). On Neon set `DATABASE_SSL=true`. Aiven free allows only 20 connections, so set `PG_POOL_MAX=6`. |
+
+**Scaling later:** raise **web → Settings → Replicas** for more players. Keep `worker` at 1. Move Postgres up a plan as the ledger grows.
+
 ## Deploy option A: frontend on Vercel, backend on an always-on host
+
+> Do the Railway steps above first. Then, to serve the site from Vercel, change these on **both** Railway services: `PUBLIC_ORIGIN=https://<your-vercel-domain>`, `PUBLIC_WS_URL=wss://<your railway web domain>/ws`, `TRUST_PROXY=2`. Keep the M-Pesa callback base URL on the Railway domain.
 
 Vercel only serves static files and short-lived functions. It **cannot** run the round worker, hold WebSockets, or reliably receive M-Pesa callbacks. So the site goes on Vercel, and the API and worker run on any host that keeps a Node process running (a Docker host or VM using the `Dockerfile`).
 
