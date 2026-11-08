@@ -1,0 +1,30 @@
+# Local development stack. Secrets come from your shell / .env file (not committed).
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      POSTGRES_DB: crash
+    volumes: [dbdata:/var/lib/postgresql/data]
+    ports: ["5432:5432"]
+  migrate:
+    build: .
+    command: ["node", "server/scripts/migrate.js"]
+    environment: &env
+      DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD}@db:5432/crash
+      SETTINGS_ENCRYPTION_KEY: ${SETTINGS_ENCRYPTION_KEY:?set SETTINGS_ENCRYPTION_KEY}
+      PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:-http://localhost:3000}
+      NODE_ENV: development
+    depends_on: [db]
+  web:
+    build: .
+    environment: *env
+    ports: ["3000:3000"]
+    depends_on: { migrate: { condition: service_completed_successfully } }
+  worker:
+    build: .
+    command: ["node", "server/src/worker.js"]
+    environment: *env
+    depends_on: { migrate: { condition: service_completed_successfully } }
+volumes:
+  dbdata:
