@@ -4,7 +4,7 @@ There is one crash table with two independent bets per round, a provably fair cr
 
 > **Licensing.** This is real-money gambling software. Production payments stay switched off until an admin sets the operator-licence flag, giving the jurisdiction and licence number. That flag is a software gate only. It does not replace the licence itself (in Kenya, from the BCLB).
 
-> **Hosting it now?** Read [Which service does what](#which-service-does-what-vercel-neon-railway-render), then follow [Host the backend now: step by step (Railway)](#host-the-backend-now-step-by-step-railway), or the [free Render option](#free-option-render-single-service-testing-only) for testing.
+> **Hosting it now?** Follow [Your setup: Vercel + Railway + Neon](#your-setup-vercel-site--railway-backend--neon-database). Other options are further down.
 
 ## Architecture
 
@@ -106,6 +106,106 @@ Then open `/admin` (password + authenticator code), add sandbox credentials, ena
 
 **Tests** (they need a throwaway DB whose name contains `test`). There are 12 integration tests, including paybill C2B, unassigned-payment assignment, balance-cache integrity and TOTP:
 `DATABASE_URL=postgres://…/crash_test npm test`. They cover provably-fair distribution, verified-callback-only crediting, forged and replayed callbacks, STK-query mismatch, bet/cancel/cashout/auto-cashout, late cashout rejection, the withdrawal reserve/release/finalise path, append-only enforcement and the provider kill-switch. `server/test/e2e.sh` runs the same flows over HTTP against a running stack, with `server/test/mock-fetch.js` preloaded so Safaricom can be faked locally. That file refuses to load in production.
+
+## Your setup: Vercel (site) + Railway (backend) + Neon (database)
+
+Players open the Vercel domain. Vercel forwards `/api/*` to Railway, and the live feed connects straight to Railway. Railway runs two services: `web` (the API) and `worker` (the round engine). M-Pesa posts its callbacks directly to Railway. All data lives in Neon.
+
+```
+player ──https──▶ Vercel (site) ──/api──▶ Railway web ──▶ Neon
+       └──wss (live feed)─────────────▶ Railway web
+Safaricom ──callbacks──────────────────▶ Railway web
+                                         Railway worker ──▶ Neon
+```
+
+Do the steps in this order: each one gives you a value the next one needs.
+
+### Step 1: Neon (database)
+1. neon.com → **New project**. Pick a **Europe** region and use a Europe region on Railway too (Railway: EU West), so the backend and database sit close together.
+2. **Connect** → copy two connection strings:
+   * **Pooled** (hostname contains `-pooler`) → you'll use this as `DATABASE_URL`
+   * **Direct** (turn *Connection pooling* off) → `DATABASE_DIRECT_URL`
+3. Remember the free-plan limit: the engine keeps Neon busy all the time, so the free 100 compute-hours run out after about 2½ weeks. That's fine while you build. Upgrade to Neon's paid plan before launch.
+
+### Step 2: Encryption key
+On your computer:
+```bash
+node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"
+```
+Save it in a password manager. Lose it, and saved provider keys can't be read. Never commit it.
+
+### Step 3: Railway `web` service
+1. railway.com → **New Project → Deploy from GitHub repo → `aviatrix`**. Rename the service **`web`**. This needs the Hobby plan.
+2. **Settings:**
+   * **Region:** EU West
+   * **Networking → Generate Domain.** Copy it, e.g. `https://aviatrix-web.up.railway.app`. This is your **backend domain**.
+   * **Deploy → Pre-deploy command:** `npm run migrate`
+   * **Deploy → Healthcheck path:** `/healthz`
+3. **Variables:**
+
+| Variable | Value |
+|---|---|
+| `DATABASE_URL` | Neon **pooled** string |
+| `DATABASE_DIRECT_URL` | Neon **direct** string |
+| `DATABASE_SSL` | `true` |
+| `SETTINGS_ENCRYPTION_KEY` | key from step 2 |
+| `NODE_ENV` | `production` |
+| `TRUST_PROXY` | `2` |
+| `PUBLIC_WS_URL` | `wss://<backend domain>/ws` |
+| `PUBLIC_ORIGIN` | for now `https://<backend domain>`; you'll change it to the Vercel domain in step 6 |
+
+Deploy. The logs should show `applied 001_init.sql`, `applied 002_paybill_scale.sql`, then `web listening`.
+
+### Step 4: Railway `worker` service
+1. In the same project: **+ New → GitHub Repo → `aviatrix`**. Name it **`worker`** and set the region to EU West.
+2. **Variables:** the same as `web`. Railway's *Shared Variables* save retyping.
+3. **Settings → Deploy → Custom start command:** `node server/src/worker.js`. No domain, and no pre-deploy command.
+4. The logs show `engine leader acquired`. Rounds are now running. Keep exactly one worker.
+
+### Step 5: Vercel (site)
+1. On your computer, in the repo:
+```bash
+npm ci
+npm run set-backend -- https://<backend domain>
+git commit -am "Point Vercel at Railway backend" && git push
+```
+   (Or edit `vercel.json` on GitHub and replace both `REPLACE-WITH-YOUR-BACKEND-DOMAIN` with your backend domain, without `https://` in the CSP line.)
+2. vercel.com → your `aviatrix` project, or **Add New → Project → import `aviatrix`**. Framework preset **Other**. Leave the build settings alone, because `vercel.json` sets them. Deploy.
+3. Copy the Vercel domain, e.g. `https://aviatrix.vercel.app`. This is your **site domain**.
+
+### Step 6: Connect Railway to the site domain
+On **both** `web` and `worker`, set `PUBLIC_ORIGIN=https://<site domain>`, with no trailing slash. Redeploy both.
+From now on, players and admins use the **site domain** only. Logins and forms on the bare Railway domain are refused on purpose.
+
+### Step 7: Admin account (from your computer, once)
+```bash
+DATABASE_URL='<Neon DIRECT string>' SETTINGS_ENCRYPTION_KEY='<key>' npm run create-admin -- yourname
+```
+(Windows PowerShell: run `$env:DATABASE_URL='...'; $env:SETTINGS_ENCRYPTION_KEY='...'` first, then `npm run create-admin -- yourname`.)
+Choose a password of 14+ characters. Add the printed **2FA secret** to your authenticator app, then clear the terminal.
+
+### Step 8: M-Pesa (sandbox)
+Open `https://<site domain>/admin` and sign in with username, password and authenticator code.
+1. **Credentials → M-Pesa · sandbox:** your Daraja sandbox keys, paybill, passkey, initiator, and the pasted sandbox certificate.
+   **Callback base URL = `https://<backend domain>`** (Railway, *not* Vercel), so Safaricom reaches the backend directly.
+2. **Limits:** set your minimums and maximums.
+3. **Providers:** M-Pesa **On**, environment sandbox, then **Register sandbox URLs** (paybill C2B).
+4. Open `https://<site domain>`, register a player, and make a test deposit from the **Cashier**. The balance moves only after Safaricom's callback. Watch the Railway **web → Logs** for `stk sent` → `deposit confirmed`.
+
+### Step 9: Before taking real money
+* **Neon:** upgrade to a paid plan (so compute never runs out, and you get point-in-time restore). Test one restore.
+* **Safaricom:** Go Live with your production Daraja app. Ask them to enable B2C on your paybill and C2B validation.
+* **Admin:** enter your BCLB licence (Providers → Operator licence), production credentials and certificate. Switch M-Pesa to production, then **Register production URLs**. This is allowed once per paybill, so do it after your final domains are set.
+* **Optional custom domains:** e.g. `play.yourdomain.co.ke` on Vercel and `api.yourdomain.co.ke` on Railway. If you add them, rerun `npm run set-backend` and update `PUBLIC_ORIGIN`, `PUBLIC_WS_URL` and the callback base URL, *before* registering production URLs.
+
+### If something's wrong
+| Symptom | Cause / fix |
+|---|---|
+| Site loads but shows "Connecting…" forever | `PUBLIC_WS_URL` is wrong, or `vercel.json` still has the placeholder. Rerun `set-backend`, push, and check the browser console for a CSP error. |
+| Every login/POST says `bad_origin` or `csrf` | `PUBLIC_ORIGIN` on Railway ≠ the Vercel address in the browser bar. |
+| `/api/...` returns 404 or a Vercel error page | The `vercel.json` rewrite still points at the placeholder or an old domain. |
+| Worker logs `engine error` about the connection | Check `DATABASE_DIRECT_URL` (it must be the non-pooler Neon string) and `DATABASE_SSL=true`. |
+| Everything stops mid-month | Neon free compute-hours ran out. Upgrade Neon. |
 
 ## Which service does what (Vercel, Neon, Railway, Render)
 

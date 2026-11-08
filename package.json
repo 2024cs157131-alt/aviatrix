@@ -10,6 +10,7 @@
     "build": "vite build client",
     "migrate": "node server/scripts/migrate.js",
     "create-admin": "node server/scripts/create-admin.js",
+    "set-backend": "node server/scripts/set-backend.js",
     "start": "node server/src/server.js",
     "worker": "node server/src/worker.js",
     "test": "node --test server/test/*.test.js",
