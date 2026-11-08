@@ -14,6 +14,10 @@ import { pool } from './db.js';
 
 void config.encryptionKey; // fail fast if the key is missing or malformed
 
+// Hosts without a release step (e.g. Render free): apply migrations at boot. Safe with several instances —
+// the migrator holds an advisory lock and skips already-applied files.
+if (process.env.MIGRATE_ON_START === 'true') await import('../scripts/migrate.js');
+
 const app = express();
 app.disable('x-powered-by');
 app.set('trust proxy', /^\d+$/.test(config.trustProxy) ? Number(config.trustProxy) : config.trustProxy);
@@ -61,6 +65,14 @@ const server = http.createServer(app);
 attachRealtime(server);
 server.listen(config.port, () => log.info('web listening', { port: config.port }));
 
-const stop = () => server.close(() => pool.end().then(() => process.exit(0)));
+// Single-service hosting: run the round engine + housekeeping in this process instead of a separate worker.
+const bg = new AbortController();
+if (process.env.RUN_ENGINE_IN_WEB === 'true') {
+  const { startBackground } = await import('./background.js');
+  startBackground({ signal: bg.signal }).catch(e => log.error('engine stopped', { err: e }));
+  log.info('round engine running inside web process');
+}
+
+const stop = () => { bg.abort(); server.close(() => pool.end().then(() => process.exit(0))); setTimeout(() => process.exit(0), 5000).unref(); };
 process.on('SIGTERM', stop);
 process.on('SIGINT', stop);

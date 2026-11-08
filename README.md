@@ -4,7 +4,7 @@ There is one crash table with two independent bets per round, a provably fair cr
 
 > **Licensing.** This is real-money gambling software. Production payments stay switched off until an admin sets the operator-licence flag, giving the jurisdiction and licence number. That flag is a software gate only. It does not replace the licence itself (in Kenya, from the BCLB).
 
-> **Hosting it now?** Jump to [Host the backend now: step by step (Railway)](#host-the-backend-now-step-by-step-railway).
+> **Hosting it now?** Read [Which service does what](#which-service-does-what-vercel-neon-railway-render), then follow [Host the backend now: step by step (Railway)](#host-the-backend-now-step-by-step-railway), or the [free Render option](#free-option-render-single-service-testing-only) for testing.
 
 ## Architecture
 
@@ -106,6 +106,43 @@ Then open `/admin` (password + authenticator code), add sandbox credentials, ena
 
 **Tests** (they need a throwaway DB whose name contains `test`). There are 12 integration tests, including paybill C2B, unassigned-payment assignment, balance-cache integrity and TOTP:
 `DATABASE_URL=postgres://…/crash_test npm test`. They cover provably-fair distribution, verified-callback-only crediting, forged and replayed callbacks, STK-query mismatch, bet/cancel/cashout/auto-cashout, late cashout rejection, the withdrawal reserve/release/finalise path, append-only enforcement and the provider kill-switch. `server/test/e2e.sh` runs the same flows over HTTP against a running stack, with `server/test/mock-fetch.js` preloaded so Safaricom can be faked locally. That file refuses to load in production.
+
+## Which service does what (Vercel, Neon, Railway, Render)
+
+The app has three parts, and each needs a different kind of host:
+
+| Part | What it needs | Can use |
+|---|---|---|
+| **Website** (React files) | Static hosting | **Vercel**, or the backend serves it itself |
+| **Backend**: API + round engine + M-Pesa callbacks | A Node process that is **always on** | **Railway** (Hobby), **Render** (paid, or free with the workaround below), any VPS. **Not Vercel.** |
+| **Database** | PostgreSQL | **Neon**, Railway Postgres, Supabase, Aiven |
+
+So Vercel and Neon don't replace Railway or Render. A typical setup is **Vercel (site) + Railway or Render (backend) + Neon (database)**.
+
+### Using Neon as the database
+1. Create a Neon project in the region closest to your backend.
+2. Copy **two** connection strings from *Connect*:
+   * **Pooled** (hostname contains `-pooler`) → `DATABASE_URL`
+   * **Direct** (no `-pooler`) → `DATABASE_DIRECT_URL`. This is needed for live updates, the engine lock and migrations.
+3. Set `DATABASE_SSL=true`. Neon's certificate is publicly trusted, so the connection is fully verified.
+4. **Free-plan catch:** the round engine queries the database every second of the day, so Neon never gets to sleep. The free plan's 100 compute-hours a month run out after roughly 2½ weeks at the smallest size (0.25 CU × 24 h × 31 days ≈ 186 CU-hours). After that the database stops until the next month. Use Neon free for development. For a live game, move to Neon's paid plan; at the smallest size that's on the order of $20/month in compute.
+
+## Free option: Render, single service (testing only)
+
+Render's free tier has two problems for this app: free web services sleep after 15 minutes without traffic, and background workers aren't free. The workaround:
+* **`RUN_ENGINE_IN_WEB=true`** runs the round engine inside the web service, so no separate worker is needed.
+* **`MIGRATE_ON_START=true`** applies database migrations when the service boots, because there's no release step on free.
+* **An uptime monitor** pings the site every 5 minutes so it never goes idle long enough to sleep.
+
+Steps:
+1. **Database first.** Use Neon (above) or Aiven. Don't use Render's free Postgres, because it expires.
+2. Render → **New → Web Service** → connect the `aviatrix` repo → runtime **Docker** → instance type **Free**.
+3. **Environment variables:** `DATABASE_URL`, `DATABASE_DIRECT_URL`, `DATABASE_SSL=true`, `SETTINGS_ENCRYPTION_KEY` (generate it as in Railway step 1), `NODE_ENV=production`, `TRUST_PROXY=1`, `RUN_ENGINE_IN_WEB=true`, `MIGRATE_ON_START=true`, and `PUBLIC_ORIGIN=https://<your-service>.onrender.com`.
+4. **Health check path:** `/healthz`. Deploy, and the logs should show `round engine running inside web process`.
+5. **Keep it awake:** create a free account on an uptime-monitoring service (for example UptimeRobot) and add an HTTP monitor on `https://<your-service>.onrender.com/healthz` every 5 minutes. Render's 750 free hours a month cover one service running all month, as long as it's your only free service.
+6. **Admin and M-Pesa:** same as Railway steps 5–6 above. Use the Neon **direct** URL as `DATABASE_URL` when running `create-admin` from your computer.
+
+**Don't take real money on this setup.** The free instance has a fraction of a CPU, and it still restarts on deploys. If it's ever asleep or restarting when Safaricom sends a paybill confirmation, that payment arrives in your paybill without being recorded, and you'd have to credit it by hand. STK deposits recover automatically, because the engine re-checks pending ones every minute once it's running. Move to an always-on paid instance (Railway Hobby or Render Starter) before launch.
 
 ## Host the backend now: step by step (Railway)
 
